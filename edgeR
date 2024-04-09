@@ -1,0 +1,711 @@
+library(edgeR)
+library(org.Gg.eg.db)
+library(tibble)
+library(dplyr)
+library(ggplot2)
+library(eulerr)
+library(UpSetR)
+
+#create annotations
+uniKeys <- keys(org.Gg.eg.db, keytype="ENTREZID")
+cols <- c("SYMBOL", "GENENAME")
+annots <- AnnotationDbi::select(org.Gg.eg.db, keys = uniKeys, columns = cols, 
+                                keytype = 'ENTREZID')
+
+rm(cols)
+
+### Importing data 
+path <- "C:/Users/Tai/Box/rnaseq/NDV_Spring_23/EdgeR"
+setwd(path)
+files <- list.files(path, pattern = "^count_sorted_.*\\.txt$")
+
+dfList <- lapply(files, function(x) {
+  read.csv(x, nrows = length(count.fields(x))-5, sep = "\t", header = F, 
+           row.names = 1, col.names = c("genes",tools::file_path_sans_ext
+                                        (basename(x))))})
+
+all.data <- bind_cols(dfList)
+
+names(all.data) = gsub(pattern = "count_sorted_", replacement = "", 
+                       x = names(all.data))
+colnames(all.data) <- gsub("(?<=M|S)1(?=H|T)", "01", colnames(all.data), perl = TRUE)
+colnames(all.data) <-gsub("(?<=4|8)C(?=1|2|3|4|5|6|7)", "NO", colnames(all.data), perl= TRUE)
+colnames(all.data) <-gsub("(?<=4|8)V(?=1|2|3|4|5|6|7)", "YES", colnames(all.data), perl= TRUE)
+
+samples <- read.csv('phenodata.csv', header = TRUE,sep = ".") #make column names systematic for selection later
+samples$ID <- gsub("(?<=M|S)1(?=H|T)", "01", colnames(all.data), perl = TRUE)
+samples$ID <-gsub("(?<=4|8)C(?=1|2|3|4|5|6|7)", "NO", colnames(all.data), perl= TRUE)
+samples$ID <-gsub("(?<=4|8)V(?=1|2|3|4|5|6|7)", "YES", colnames(all.data), perl= TRUE)
+samples$AGE <- gsub("^1$", "01", samples$AGE)
+rownames(samples) <- samples$ID
+samples$ID <- NULL
+
+rm(files)
+rm(path)
+
+
+#Prepare to analyze by organ an hpv
+organs <- c('HG', 'TC')
+hpv <- c('24', '48')
+temp.sig.degs.vacc <- list()
+temp.sig.degs.types <- list()
+temp.sig.degs.age <- list()
+temp.sig.degs.typage <- list()
+temp.sig.degs.vacc.type <- list()
+temp.sig.degs.vacc.age <- list()
+temp.sig.degs.vacc.typage <- list()
+listoflists <- list()
+
+
+for (organ in organs) {
+  for(hpv in hpv) {
+    
+    pattern <- paste(organ, hpv, sep="") 
+    
+    #Start subseting the data
+    temp.data <- all.data[, grepl(pattern, colnames(all.data))]
+    
+    #Subset the samples data frame
+    temp.samples <- samples[colnames(temp.data), ]
+    
+    # Create the group factor for the samples in the current matrix
+    group <- factor(paste(as.character(unlist(temp.samples$TYPE)), as.character(unlist(temp.samples$AGE)), as.character(unlist(temp.samples$VACC)), sep = "."))
+    temp.y <- DGEList(counts =  temp.data, group = group)
+    temp.keep <- filterByExpr( temp.y) #filter out low expressed genes
+    temp.y <-  temp.y[ temp.keep, , keep.lib.sizes = FALSE]
+    temp.y <- calcNormFactors( temp.y) #normalize
+    
+    # Convert main factors to a R factor to create design matrix
+    temp.samples$VACC <- as.factor(temp.samples$VACC)
+    temp.samples$AGE <- as.factor(temp.samples$AGE)
+    temp.samples$TYPE <- as.factor(temp.samples$TYPE)
+    
+    temp.samples$VACC <- relevel(temp.samples$VACC, ref="NO")
+    temp.samples$TYPE <- relevel(temp.samples$TYPE, ref = "CM")
+    temp.samples$AGE <- relevel(temp.samples$AGE, ref = "01")
+    design <- model.matrix(~ VACC * TYPE * AGE, data = temp.samples)
+    
+    #Estimate dispersion
+    temp.y <- estimateGLMCommonDisp( temp.y, design = design)
+    temp.y <- estimateGLMTagwiseDisp( temp.y, design = design)
+    
+    # Fit data in the model
+    fit <- glmQLFit( temp.y, design)
+    
+    # Apply the glmQLFTest to each coefficient
+    temp.qlf <- glmQLFTest(fit)
+    temp.qlf.vaccyes <- glmQLFTest(fit, coef = 2) 
+    temp.qlf.types <- glmQLFTest(fit, coef = 3)
+    temp.qlf.age14 <- glmQLFTest(fit, coef = 4)
+    temp.qlf.vacctype <- glmQLFTest(fit, coef = 5)
+    temp.qlf.vaccage <- glmQLFTest (fit, coef = 6)
+    temp.qlf.typage <- glmQLFTest (fit, coef = 7)
+    temp.qlf.vacctypage <- glmQLFTest (fit, coef = 8)
+    
+    # Create a list with all expressed genes
+    temp.results.vaccyes <- temp.qlf.vaccyes
+    temp.results.types <- temp.qlf.types
+    temp.results.age14 <- temp.qlf.age14
+    temp.results.vacctype <- temp.qlf.vacctype
+    temp.results.vaccage <- temp.qlf.vaccage
+    temp.results.typage <- temp.qlf.typage
+    temp.results.vacctypage <- temp.qlf.vacctypage
+    
+    #get the list with all expressed genes, adjust false discovery rate
+    temp.results.vaccyes <- topTags(temp.qlf.vaccyes, n = 40000)
+    temp.results.types <- topTags(temp.qlf.types, n = 40000)
+    temp.results.age14 <- topTags(temp.qlf.age14, n = 40000)
+    temp.results.vacctype <- topTags(temp.qlf.vacctype, n = 40000)
+    temp.results.vaccage <- topTags(temp.qlf.vaccage, n = 40000)
+    temp.results.typage <- topTags(temp.qlf.typage, n = 40000)
+    temp.results.vacctypage <- topTags(temp.qlf.vacctypage, n = 40000)
+    
+    FDR.vaccyes <- p.adjust(temp.results.vaccyes$table$PValue, method = "BH")
+    FDR.types <- p.adjust(temp.results.types$table$PValue, method = "BH")
+    FDR.age14 <- p.adjust(temp.results.age14$table$PValue, method = "BH")
+    FDR.vacctype <- p.adjust(temp.results.vacctype$table$PValue, method = "BH")
+    FDR.vaccage <- p.adjust(temp.results.vaccage$table$PValue, method = "BH")
+    FDR.typage <- p.adjust(temp.results.typage$table$PValue, method = "BH")
+    FDR.vacctypeage <- p.adjust(temp.results.vacctypage$table$PValue, method = "BH")
+    
+    #Export results
+    temp.deg.vaccyes <- temp.results.vaccyes$table  
+    temp.deg.types <- temp.results.types$table
+    temp.deg.age14 <- temp.results.age14$table
+    temp.deg.vacctype <- temp.results.vacctype$table
+    temp.deg.vaccage <- temp.results.vaccage$table
+    temp.deg.typage <- temp.results.typage$table
+    temp.deg.vacctypage <- temp.results.vacctypage$table
+    
+    #merge with gene names
+    temp.deg.vaccyes <- temp.results.vaccyes$table  
+    temp.deg.vaccyes <- as.data.frame(temp.results.vaccyes$table)
+    temp.deg.vaccyes$gene <- rownames(temp.deg.vaccyes) 
+    temp.deg.vaccyes.genes <- merge(temp.deg.vaccyes, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.types <- temp.results.types$table  
+    temp.deg.types <- as.data.frame(temp.results.types$table)
+    temp.deg.types$gene <- rownames(temp.deg.types) 
+    temp.deg.types.genes <- merge(temp.deg.types, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.age14 <- temp.results.age14$table  
+    temp.deg.age14 <- as.data.frame(temp.results.age14$table)
+    temp.deg.age14$gene <- rownames(temp.deg.age14) 
+    temp.deg.age14.genes <- merge(temp.deg.age14, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.vacctype <- temp.results.vacctype$table  
+    temp.deg.vacctype <- as.data.frame(temp.results.vacctype$table)
+    temp.deg.vacctype$gene <- rownames(temp.deg.vacctype) 
+    temp.deg.vacctype.genes <- merge(temp.deg.vacctype, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.vaccage <- temp.results.vaccage$table  
+    temp.deg.vaccage <- as.data.frame(temp.results.vaccage$table)
+    temp.deg.vaccage$gene <- rownames(temp.deg.vaccage) 
+    temp.deg.vaccage.genes <- merge(temp.deg.vaccage, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.typage <- temp.results.typage$table
+    temp.deg.typage <- as.data.frame(temp.results.typage$table)
+    temp.deg.typage$gene <- rownames(temp.deg.typage) 
+    temp.deg.typage.genes <- merge(temp.deg.typage, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    temp.deg.vacctypage <- temp.results.vacctypage$table  
+    temp.deg.vacctypage <- as.data.frame(temp.results.vacctypage$table)
+    temp.deg.vacctypage$gene <- rownames(temp.deg.vacctypage) 
+    temp.deg.vacctypage.genes <- merge(temp.deg.vacctypage, annots,by.x = 'gene', by.y = 'SYMBOL')
+    
+    #filter for logFC and P-value
+    temp.results.vaccyes.sig <- temp.deg.vaccyes.genes[temp.deg.vaccyes.genes$PValue < 0.05,]
+    temp.DE.up_vaccyes <- temp.results.vaccyes.sig[temp.results.vaccyes.sig$logFC > 1.5,]
+    temp.DE.down_vaccyes <- temp.results.vaccyes.sig[temp.results.vaccyes.sig$logFC < -1.5,]
+    
+    temp.results.types.sig <- temp.deg.types.genes[temp.deg.types.genes$PValue < 0.05,]
+    temp.DE.up_types <- temp.results.types.sig[temp.results.types.sig$logFC > 1.5,]
+    temp.DE.down_types <- temp.results.types.sig[temp.results.types.sig$logFC < -1.5,]
+    
+    temp.results.age14.sig <- temp.deg.age14.genes[temp.deg.age14.genes$PValue < 0.05,]
+    temp.DE.up_age14 <- temp.results.age14.sig[temp.results.age14.sig$logFC > 1.5,]
+    temp.DE.down_age14 <- temp.results.age14.sig[temp.results.age14.sig$logFC < -1.5,]
+    
+    temp.results.vacctype.sig <- temp.deg.vacctype.genes[temp.deg.vacctype.genes$PValue <0.05,]
+    temp.DE.up_vacctype <- temp.results.vacctype.sig[temp.results.vacctype.sig$logFC > 1.5,]
+    temp.DE.down_vacctype <- temp.results.vacctype.sig[temp.results.vacctype.sig$logFC < -1.5,]
+    
+    temp.results.vaccage.sig <- temp.deg.vaccage.genes[temp.deg.vaccage.genes$PValue < 0.05,]
+    temp.DE.up_vaccage <- temp.results.vaccage.sig[temp.results.vaccage.sig$logFC > 1.5,]
+    temp.DE.down_vaccage <- temp.results.vaccage.sig[temp.results.vaccage.sig$logFC < -1.5,]
+    
+    temp.results.typage.sig <- temp.deg.typage.genes[temp.deg.typage.genes$PValue < 0.05,]
+    temp.DE.up_typage <- temp.results.typage.sig[temp.results.typage.sig$logFC > 1.5,]
+    temp.DE.down_typage <- temp.results.typage.sig[temp.results.typage.sig$logFC < -1.5,]
+    
+    temp.results.vacctypage.sig <- temp.deg.vacctypage.genes[temp.deg.vacctypage.genes$PValue < 0.05,]
+    temp.DE.up_vacctypage <- temp.results.vacctypage.sig[temp.results.vacctypage.sig$logFC > 1.5,]
+    temp.DE.down_vacctypage <- temp.results.vacctypage.sig[temp.results.vacctypage.sig$logFC < -1.5,]
+    
+    #bind the filtered results together
+    temp.DE_vaccyes_combined <- rbind(temp.DE.up_vaccyes, temp.DE.down_vaccyes)
+    temp.DE_types_combined <- rbind(temp.DE.up_types, temp.DE.down_types)
+    temp.DE_age14_combined <- rbind(temp.DE.up_age14, temp.DE.down_age14)
+    temp.DE_vacctype_combined <- rbind(temp.DE.up_vacctype, temp.DE.down_vacctype)
+    temp.DE_vaccage_combined <- rbind(temp.DE.up_vaccage, temp.DE.down_vaccage)
+    temp.DE_typage_combined <- rbind(temp.DE.up_typage, temp.DE.down_typage)
+    temp.DE_vacctypage_combined <- rbind(temp.DE.up_vacctypage, temp.DE.down_vacctypage)
+    
+    #Start storing the results 
+    
+    temp.sig.degs.vacc <- temp.DE_vaccyes_combined
+    temp.sig.degs.vacc$signal <- NA
+    temp.sig.degs.vacc <- temp.sig.degs.vacc  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.types <- temp.DE_types_combined
+    temp.sig.degs.types$signal <- NA
+    temp.sig.degs.types <- temp.sig.degs.types  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.age <- temp.DE_age14_combined
+    temp.sig.degs.age$signal <- NA
+    temp.sig.degs.age <- temp.sig.degs.age  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.typage <- temp.DE_typage_combined
+    temp.sig.degs.typage$signal <- NA
+    temp.sig.degs.typage <- temp.sig.degs.typage  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.vacc.age <- temp.DE_vaccage_combined
+    temp.sig.degs.vacc.age$signal <- NA
+    temp.sig.degs.vacc.age <- temp.sig.degs.vacc.age  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.vacc.type <- temp.DE_vacctype_combined
+    temp.sig.degs.vacc.type$signal <- NA
+    temp.sig.degs.vacc.type <- temp.sig.degs.vacc.type  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    temp.sig.degs.vacc.typage  <- temp.DE_vacctypage_combined
+    temp.sig.degs.vacc.typage $signal <- NA
+    temp.sig.degs.vacc.typage  <- temp.sig.degs.vacc.typage  %>% mutate(signal = ifelse(logFC > 0, 'up', 'down'))
+    
+    listoflists[[paste(organ, hpv, "VACC", sep = "_")]] <- temp.sig.degs.vacc 
+    listoflists[[paste(organ, hpv, "TYPE", sep = "_")]] <- temp.sig.degs.types 
+    listoflists[[paste(organ, hpv, "AGE", sep = "_")]] <- temp.sig.degs.age 
+    listoflists[[paste(organ, hpv, "TYPEAGE", sep = "_")]] <- temp.sig.degs.typage 
+    listoflists[[paste(organ, hpv, "VACCTYPE", sep = "_")]] <- temp.sig.degs.vacc.type 
+    listoflists[[paste(organ, hpv, "VACCAGE", sep = "_")]] <- temp.sig.degs.vacc.age
+    listoflists[[paste(organ, hpv, "VACCTYPEAGE", sep = "_")]] <- temp.sig.degs.vacc.typage
+  }
+}
+
+#From here on, it needs optimization
+
+# Get the names of the lists in listoflists
+names_of_lists <- names(listoflists)
+
+#prepare the pathway master list
+listofpathways <- list()
+
+# Loop over the names
+for (name in names_of_lists) {
+    # Store one list at a time
+    temp.out1 <- listoflists[[name]]
+    temp.out2 <- listoflists[[name]]
+    
+    # Get the genes ENTREZID
+    assign(paste0(name, "_up.vector"), subset(listoflists[[name]], signal == "up")$ENTREZID)
+    assign(paste0(name, "_down.vector"), subset(listoflists[[name]], signal == "down")$ENTREZID)
+
+    #Apply the goana
+    assign(paste0(name, "_up.go"), goana(get(paste0(name, "_up.vector")), species = "Gg", pvalue = 0.05))
+    assign(paste0(name, "_down.go"), goana(get(paste0(name, "_down.vector")), species = "Gg", pvalue = 0.05))
+    assign(paste0(name, "_go.results"), bind_rows(get(paste0(name, "_up.go")), get(paste0(name, "_down.go"))))
+
+    #Filtering Step
+
+    #Filter for significant results
+    go_sig <- get(paste0(name, "_go.results")) %>% rownames_to_column("goid") %>% 
+    as_tibble() %>% dplyr:: filter(DE > 0) %>% mutate(GeneRatio = DE/N) %>% 
+    arrange(P.DE) %>% mutate (adjP = p.adjust(P.DE, "fdr"))
+    assign(paste0(name, "_go_sig"), go_sig)
+    assign(paste0(name, "_plotGO_sig"), 
+    topGO(get(paste0(name, "_plotGO_sig")), n = 50))
+
+    #Store the results to use for upset plot
+    listofpathways[[paste(name)]] <- get(paste0(name, "_plotGO_sig"))
+}
+
+
+
+######################################
+##### Start upset plot for DEGs ######
+######################################
+
+
+# extract the appropriate lists
+
+hg24.vacc.deg.list <- as.list(sig.degs.hg24.vacc$gene)
+hg48.vacc.deg.list <- as.list(sig.degs.hg48.vacc$gene)
+tc24.vacc.deg.list <- as.list(sig.degs.tc24.vacc$gene)
+tc48.vacc.deg.list <- as.list(sig.degs.tc48.vacc$gene)
+
+list_of_lists <- list("HG 24" = hg24.vacc.deg.list, "HG 48" = hg48.vacc.deg.list, 
+                      "TC 24" = tc24.vacc.deg.list, "TC 48" = tc48.vacc.deg.list)
+
+
+# do the upset plot
+
+upset(fromList(list_of_lists), nsets = 4,
+      sets = c("HG 24", "HG 48", "TC 24", "TC 48"),
+      mb.ratio = c(0.55, 0.45),
+      sets.bar.color = "darkblue", main.bar.color = "darkorange",
+      text.scale = c(2,2,2,2),
+      sets.x.label = "number of DEGs",
+      order.by = "freq")
+
+# extract the genes of interest  (the common DEGs)
+
+common_vec <- list(hg24 = hg24.vacc.deg.list,
+                 hg48 = hg48.vacc.deg.list,
+                 tc24 = tc24.vacc.deg.list,
+                 tc48 = tc48.vacc.deg.list) 
+
+int_genes <- Reduce(intersect, common_vec)
+
+#create a data frame to bind the logFC from each analysis 
+int_genes.df <- data.frame('gene' = rep(NA, 21))
+int_genes.df$gene <- as.character(int_genes)
+
+#bind the logFC and signal for each gene from hg24, hg48, tc24, tc48
+
+merged_df <- merge(int_genes.df, sig.degs.hg24.vacc, by = "gene", all.x = TRUE)
+merged_df <- subset(merged_df, select = -c(3:8))
+colnames(merged_df)[2] <- "logFC_hg24"
+merged_df <- merge(merged_df, sig.degs.hg48.vacc, by = "gene", all.x = TRUE, 
+                   suffixes = c("", "_hg48"))
+merged_df <- subset(merged_df, select = -c(5:10))
+colnames(merged_df)[4] <- "logFC_hg48"
+merged_df <- merge(merged_df, sig.degs.tc24.vacc, by = "gene", all.x = TRUE, 
+                   suffixes = c("", "_tc24"))
+merged_df <- subset(merged_df, select = -c(7:12))
+merged_df <- merge(merged_df, sig.degs.tc48.vacc, by = "gene", all.x = TRUE, 
+                   suffixes = c("", "_tc48"))
+merged_df <- subset(merged_df, select = -c(9:12))
+
+#export the info
+
+write.csv(merged_df, file = 'definitive_common.csv')
+
+
+#Now extract the appropriate list to get the numb of unique degs for 
+#Each main factor - interactions
+
+hg24.age.deg.list <- as.list(sig.degs.hg24.age$gene)
+hg48.age.deg.list <- as.list(sig.degs.hg48.age$gene)
+tc24.age.deg.list <- as.list(sig.degs.tc24.age$gene)
+tc48.age.deg.list <- as.list(sig.degs.tc48.age$gene)
+
+all.age.genes <- c(hg24.age.deg.list, hg48.age.deg.list, 
+                   tc24.age.deg.list, tc48.age.deg.list)
+
+unique_age <- length(unique(all.age.genes))
+
+hg24.type.deg.list <- as.list(sig.degs.hg24.type$gene)
+hg48.type.deg.list <- as.list(sig.degs.hg48.type$gene)
+tc24.type.deg.list <- as.list(sig.degs.tc24.type$gene)
+tc48.type.deg.list <- as.list(sig.degs.tc48.type$gene)
+
+all.type.genes <- c(hg24.type.deg.list, hg48.type.deg.list, tc24.type.deg.list, 
+                    tc48.type.deg.list)
+
+unique_type <- length(unique(all.type.genes))
+
+
+hg24.typage.deg.list <- as.list(sig.degs.hg24.typage$gene)
+hg48.typage.deg.list <- as.list(sig.degs.hg48.typage$gene)
+tc24.typage.deg.list <- as.list(sig.degs.tc24.typage$gene)
+tc48.typage.deg.list <- as.list(sig.degs.tc48.typage$gene)
+
+all.typage.genes <- c(hg24.typage.deg.list, hg48.typage.deg.list, tc24.typage.deg.list, 
+                      tc48.typage.deg.list)
+
+unique_typage <- length(unique(all.typage.genes))
+
+
+hg24.vacc.age.deg.list <- as.list(sig.degs.hg24.vacc.age$gene)
+hg48.vacc.age.deg.list <- as.list(sig.degs.hg48.vacc.age$gene)
+tc24.vacc.age.deg.list <- as.list(sig.degs.tc24.vacc.age$gene)
+tc48.vacc.age.deg.list <- as.list(sig.degs.tc48.vacc.age$gene)
+
+all.vacc.age.genes <- c(hg24.vacc.age.deg.list, 
+                        hg48.vacc.age.deg.list, tc24.vacc.age.deg.list, 
+                        tc48.vacc.age.deg.list)
+
+unique_vaccage <- length(unique(all.vacc.age.genes))
+
+
+hg24.vacc.type.deg.list <- as.list(sig.degs.hg24.vacc.type$gene)
+hg48.vacc.type.deg.list <- as.list(sig.degs.hg48.vacc.type$gene)
+tc24.vacc.type.deg.list <- as.list(sig.degs.tc24.vacc.type$gene)
+tc48.vacc.type.deg.list <- as.list(sig.degs.tc48.vacc.type$gene)
+
+all.vacc.type.genes <- c(hg24.vacc.type.deg.list, 
+                         hg48.vacc.type.deg.list, 
+                         tc24.vacc.type.deg.list, 
+                         tc48.vacc.type.deg.list)
+
+unique_vacctype <- length(unique(all.vacc.type.genes))
+
+
+hg24.vacc.age.type.deg.list <- as.list(sig.degs.hg24.vacc.age.type$gene)
+hg48.vacc.age.type.deg.list <- as.list(sig.degs.hg48.vacc.age.type$gene)
+tc24.vacc.age.type.deg.list <- as.list(sig.degs.tc24.vacc.age.type$gene)
+tc48.vacc.age.type.deg.list <- as.list(sig.degs.tc48.vacc.age.type$gene)
+
+all.vacc.age.type.genes <- c(hg24.vacc.age.type.deg.list, 
+                             hg48.vacc.age.type.deg.list, 
+                             tc24.vacc.age.type.deg.list, 
+                             tc48.vacc.age.type.deg.list)
+
+unique_vaccagetype <- length(unique(all.vacc.age.genes))
+
+#add them to a table
+org.hpv.uniq.degs <- data.frame(matrix(ncol = 2, nrow = 0))
+colnames(org.hpv.uniq.degs) <- c('organ.hpv', 'n of genes')
+
+org.hpv.uniq.degs[1,'organ.hpv'] <- "hg.24"
+org.hpv.uniq.degs[1,'n of genes'] <- length(hg24_uniq)
+org.hpv.uniq.degs[2,'organ.hpv'] <- "hg.48"
+org.hpv.uniq.degs[2,'n of genes'] <- length(hg48_uniq)
+org.hpv.uniq.degs[3,'organ.hpv'] <- "tc.24"
+org.hpv.uniq.degs[3,'n of genes'] <- length(tc24_uniq)
+org.hpv.uniq.degs[4,'organ.hpv'] <- "tc.48"
+org.hpv.uniq.degs[4,'n of genes'] <- length(tc48_uniq)
+
+#Export the table with the number of unique degs per organ and hpv
+
+write.csv(org.hpv.uniq.degs, 'unique_degs_sum.csv')
+
+#get info abt the number of up and down regulated gene for each 
+#main factor/interaction within each organ and hpv
+
+sum.degs <- data.frame(matrix(ncol = 5, nrow = 0))
+colnames(sum.degs) <- c('comparison', 'organ', 'hpi', 'up', 'down')
+
+comparison <- c('vacc', 'age', 'type', 'vacc:age', 'vacc:type',
+                'vacc:age:type')  # if necessary add age:type#
+
+sum.degs[1,'comparison'] <- "vacc"
+sum.degs[1,'organ'] <- "hg"
+sum.degs[1,'hpi'] <- "24"
+sum.degs[1,'up'] <- sum(sig.degs.hg24.vacc$signal == 'up')
+sum.degs[1,'down'] <- sum(sig.degs.hg24.vacc$signal == 'down')
+sum.degs[2,'comparison'] <- "vacc"
+sum.degs[2,'organ'] <- "hg"
+sum.degs[2,'hpi'] <- "48"
+sum.degs[2,'up'] <- sum(sig.degs.hg48.vacc$signal == 'up')
+sum.degs[2,'down'] <- sum(sig.degs.hg48.vacc$signal == 'down')
+sum.degs[3,'comparison'] <- "vacc"
+sum.degs[3,'organ'] <- "tc"
+sum.degs[3,'hpi'] <- "24"
+sum.degs[3,'up'] <- sum(sig.degs.tc24.vacc$signal == 'up')
+sum.degs[3,'down'] <- sum(sig.degs.tc24.vacc$signal == 'down')
+sum.degs[4,'comparison'] <- "vacc"
+sum.degs[4,'organ'] <- "tc"
+sum.degs[4,'hpi'] <- "48"
+sum.degs[4,'up'] <- sum(sig.degs.tc48.vacc$signal == 'up')
+sum.degs[4,'down'] <- sum(sig.degs.tc48.vacc$signal == 'down')
+sum.degs[5,'comparison'] <- "age"
+sum.degs[5,'organ'] <- "hg"
+sum.degs[5,'hpi'] <- "24"
+sum.degs[5,'up'] <- sum(sig.degs.hg24.age$signal == 'up')
+sum.degs[5,'down'] <- sum(sig.degs.hg24.age$signal == 'down')
+sum.degs[6,'comparison'] <- "age"
+sum.degs[6,'organ'] <- "hg"
+sum.degs[6,'hpi'] <- "48"
+sum.degs[6,'up'] <- sum(sig.degs.hg48.age$signal == 'up')
+sum.degs[6,'down'] <- sum(sig.degs.hg48.age$signal == 'down')
+sum.degs[7,'comparison'] <- "age"
+sum.degs[7,'organ'] <- "tc"
+sum.degs[7,'hpi'] <- "24"
+sum.degs[7,'up'] <- sum(sig.degs.tc24.age$signal == 'up')
+sum.degs[7,'down'] <- sum(sig.degs.tc24.age$signal == 'down')
+sum.degs[8,'comparison'] <- "age"
+sum.degs[8,'organ'] <- "tc"
+sum.degs[8,'hpi'] <- "48"
+sum.degs[8,'up'] <- sum(sig.degs.tc48.age$signal == 'up')
+sum.degs[8,'down'] <- sum(sig.degs.tc48.age$signal == 'down')
+sum.degs[9,'comparison'] <- "type"
+sum.degs[9,'organ'] <- "hg"
+sum.degs[9,'hpi'] <- "24"
+sum.degs[9,'up'] <- sum(sig.degs.hg24.type$signal == 'up')
+sum.degs[9,'down'] <- sum(sig.degs.hg24.type$signal == 'down')
+sum.degs[10,'comparison'] <- "type"
+sum.degs[10,'organ'] <- "hg"
+sum.degs[10,'hpi'] <- "48"
+sum.degs[10,'up'] <- sum(sig.degs.hg48.type$signal == 'up')
+sum.degs[10,'down'] <- sum(sig.degs.hg48.type$signal == 'down')
+sum.degs[11,'comparison'] <- "type"
+sum.degs[11,'organ'] <- "tc"
+sum.degs[11,'hpi'] <- "24"
+sum.degs[11,'up'] <- sum(sig.degs.tc24.type$signal == 'up')
+sum.degs[11,'down'] <- sum(sig.degs.tc24.type$signal == 'down')
+sum.degs[12,'comparison'] <- "type"
+sum.degs[12,'organ'] <- "tc"
+sum.degs[12,'hpi'] <- "48"
+sum.degs[12,'up'] <- sum(sig.degs.tc48.type$signal == 'up')
+sum.degs[12,'down'] <- sum(sig.degs.tc48.type$signal == 'down')
+sum.degs[13,'comparison'] <- "vacc:age"
+sum.degs[13,'organ'] <- "hg"
+sum.degs[13,'hpi'] <- "24"
+sum.degs[13,'up'] <- sum(sig.degs.hg24.vacc.age$signal == 'up')
+sum.degs[13,'down'] <- sum(sig.degs.hg24.vacc.age$signal == 'down')
+sum.degs[14,'comparison'] <- "vacc:age"
+sum.degs[14,'organ'] <- "hg"
+sum.degs[14,'hpi'] <- "48"
+sum.degs[14,'up'] <- sum(sig.degs.hg48.vacc.age$signal == 'up')
+sum.degs[14,'down'] <- sum(sig.degs.hg48.vacc.age$signal == 'down')
+sum.degs[15,'comparison'] <- "vacc:age"
+sum.degs[15,'organ'] <- "tc"
+sum.degs[15,'hpi'] <- "24"
+sum.degs[15,'up'] <- sum(sig.degs.tc24.vacc.age$signal == 'up')
+sum.degs[15,'down'] <- sum(sig.degs.tc24.vacc.age$signal == 'down')
+sum.degs[16,'comparison'] <- "vacc:age"
+sum.degs[16,'organ'] <- "tc"
+sum.degs[16,'hpi'] <- "48"
+sum.degs[16,'up'] <- sum(sig.degs.tc48.vacc.age$signal == 'up')
+sum.degs[16,'down'] <- sum(sig.degs.tc48.vacc.age$signal == 'down')
+sum.degs[17,'comparison'] <- "vacc:type"
+sum.degs[17,'organ'] <- "hg"
+sum.degs[17,'hpi'] <- "24"
+sum.degs[17,'up'] <- sum(sig.degs.hg24.vacc.type$signal == 'up')
+sum.degs[17,'down'] <- sum(sig.degs.hg24.vacc.type$signal == 'down')
+sum.degs[18,'comparison'] <- "vacc:type"
+sum.degs[18,'organ'] <- "hg"
+sum.degs[18,'hpi'] <- "48"
+sum.degs[18,'up'] <- sum(sig.degs.hg48.vacc.type$signal == 'up')
+sum.degs[18,'down'] <- sum(sig.degs.hg48.vacc.type$signal == 'down')
+sum.degs[19,'comparison'] <- "vacc:type"
+sum.degs[19,'organ'] <- "tc"
+sum.degs[19,'hpi'] <- "24"
+sum.degs[19,'up'] <- sum(sig.degs.tc24.vacc.type$signal == 'up')
+sum.degs[19,'down'] <- sum(sig.degs.tc24.vacc.type$signal == 'down')
+sum.degs[20,'comparison'] <- "vacc:type"
+sum.degs[20,'organ'] <- "tc"
+sum.degs[20,'hpi'] <- "48"
+sum.degs[20,'up'] <- sum(sig.degs.tc48.vacc.type$signal == 'up')
+sum.degs[20,'down'] <- sum(sig.degs.tc48.vacc.type$signal == 'down')
+sum.degs[21,'comparison'] <- "vacc:type:age"
+sum.degs[21,'organ'] <- "hg"
+sum.degs[21,'hpi'] <- "24"
+sum.degs[21,'up'] <- sum(sig.degs.hg24.vacc.age.type$signal == 'up')
+sum.degs[21,'down'] <- sum(sig.degs.hg24.vacc.age.type$signal == 'down')
+sum.degs[22,'comparison'] <- "vacc:type:age"
+sum.degs[22,'organ'] <- "hg"
+sum.degs[22,'hpi'] <- "48"
+sum.degs[22,'up'] <- sum(sig.degs.hg48.vacc.age.type$signal == 'up')
+sum.degs[22,'down'] <- sum(sig.degs.hg48.vacc.age.type$signal == 'down')
+sum.degs[23,'comparison'] <- "vacc:type:age"
+sum.degs[23,'organ'] <- "tc"
+sum.degs[23,'hpi'] <- "24"
+sum.degs[23,'up'] <- sum(sig.degs.tc24.vacc.age.type$signal == 'up')
+sum.degs[23,'down'] <- sum(sig.degs.tc24.vacc.age.type$signal == 'down')
+sum.degs[24,'comparison'] <- "vacc:type:age"
+sum.degs[24,'organ'] <- "tc"
+sum.degs[24,'hpi'] <- "48"
+sum.degs[24,'up'] <- sum(sig.degs.tc48.vacc.age.type$signal == 'up')
+sum.degs[24,'down'] <- sum(sig.degs.tc48.vacc.age.type$signal == 'down')
+sum.degs[25,'comparison'] <- "type:age"
+sum.degs[25,'organ'] <- "hg"
+sum.degs[25,'hpi'] <- "24"
+sum.degs[25,'up'] <- sum(sig.degs.hg24.typage$signal == 'up')
+sum.degs[25,'down'] <- sum(sig.degs.hg24.typage$signal == 'down')
+sum.degs[26,'comparison'] <- "type:age"
+sum.degs[26,'organ'] <- "hg"
+sum.degs[26,'hpi'] <- "48"
+sum.degs[26,'up'] <- sum(sig.degs.hg48.typage$signal == 'up')
+sum.degs[26,'down'] <- sum(sig.degs.hg48.typage$signal == 'down')
+sum.degs[27,'comparison'] <- "type:age"
+sum.degs[27,'organ'] <- "tc"
+sum.degs[27,'hpi'] <- "24"
+sum.degs[27,'up'] <- sum(sig.degs.tc24.typage$signal == 'up')
+sum.degs[27,'down'] <- sum(sig.degs.tc24.typage$signal == 'down')
+sum.degs[28,'comparison'] <- "type:age"
+sum.degs[28,'organ'] <- "tc"
+sum.degs[28,'hpi'] <- "48"
+sum.degs[28,'up'] <- sum(sig.degs.tc48.typage$signal == 'up')
+sum.degs[28,'down'] <- sum(sig.degs.tc48.typage$signal == 'down')
+
+#export
+
+write.csv(sum.degs, file = 'sum_degs_info.csv')
+
+
+
+####################################
+######## Upset for pathways ########
+####################################
+
+# extract the appropriate lists to get the common genes between all vacc groups
+
+hg24.vacc.go.list <- as.list(sig.path.hg24.vacc$goid)
+hg48.vacc.go.list <- as.list(sig.path.hg48.vacc$goid)
+tc24.vacc.go.list <- as.list(sig.path.tc24.vacc$goid)
+tc48.vacc.go.list <- as.list(sig.path.tc48.vacc$goid)
+
+list_go_lists <- list("HG 24" = hg24.vacc.go.list, "HG 48" = hg48.vacc.go.list, 
+                      "TC 24" = tc24.vacc.go.list, "TC 48" = tc48.vacc.go.list)
+
+
+# do the upset plot
+
+upset(fromList(list_go_lists), nsets = 4,
+      sets = c("HG 24", "HG 48", "TC 24", "TC 48"),
+      mb.ratio = c(0.55, 0.45),
+      sets.bar.color = "darkblue", main.bar.color = "darkorange",
+      text.scale = c(2,2,2,2),
+      sets.x.label = "number of pathways",
+      order.by = "freq")
+
+# extract the genes of interest  (the common go)
+
+common.go_vec <- list(hg24 = hg24.vacc.go.list,
+                      hg48 = hg48.vacc.go.list,
+                      tc24 = tc24.vacc.go.list,
+                      tc48 = tc48.vacc.go.list) 
+
+int_go <- Reduce(intersect, common.go_vec)
+
+
+###Zero common genes so jump into the unique
+
+#Now extract the appropriate list to get the numb of unique degs for 
+#Each main factor - interactions
+
+hg24.vacc.go.list <- as.list(sig.path.hg24.vacc$goid)
+hg48.vacc.go.list <- as.list(sig.path.hg48.vacc$goid)
+tc24.vacc.go.list <- as.list(sig.path.tc24.vacc$goid)
+tc48.vac.go.list <- as.list(sig.path.tc48.vacc$goid)
+
+all.vacc.go <- c(hg24.vacc.go.list, hg48.vacc.go.list, 
+                 tc24.vacc.go.list, tc48.vacc.go.list)
+
+unique.go_vacc <- length(unique(all.vacc.go))
+
+
+hg24.age.go.list <- as.list(sig.path.hg24.age$goid)
+hg48.age.go.list <- as.list(sig.path.hg48.age$goid)
+tc24.age.go.list <- as.list(sig.path.tc24.age$goid)
+tc48.age.go.list <- as.list(sig.path.tc48.age$goid)
+
+all.age.go <- c(hg24.age.go.list, hg48.age.go.list, 
+                tc24.age.go.list, tc48.age.go.list)
+
+unique.go_age <- length(unique(all.age.go))
+
+hg24.type.go.list <- as.list(sig.path.hg24.type$goid)
+hg48.type.go.list <- as.list(sig.path.hg48.type$goid)
+tc24.type.go.list <- as.list(sig.path.tc24.type$goid)
+tc48.type.go.list <- as.list(sig.path.tc48.type$goid)
+
+all.type.go <- c(hg24.type.go.list, hg48.type.go.list, tc24.type.go.list, 
+                 tc48.type.go.list)
+
+unique.go_type <- length(unique(all.type.go))
+
+
+hg24.typage.go.list <- as.list(sig.path.hg24.typage$goid)
+hg48.typage.go.list <- as.list(sig.path.hg48.typage$goid)
+tc24.typage.go.list <- as.list(sig.path.tc24.typage$goid)
+tc48.typage.go.list <- as.list(sig.path.tc48.typage$goid)
+
+all.typage.go <- c(hg24.typage.go.list, hg48.typage.go.list, tc24.typage.go.list, 
+                   tc48.typage.go.list)
+
+unique.go_typage <- length(unique(all.typage.go))
+
+
+hg24.vacc.age.go.list <- as.list(sig.path.hg24.vacc.age$goid)
+hg48.vacc.age.go.list <- as.list(sig.path.hg48.vacc.age$goid)
+tc24.vacc.age.go.list <- as.list(sig.path.tc24.vacc.age$goid)
+tc48.vacc.age.go.list <- as.list(sig.path.tc48.vacc.age$goid)
+
+all.vacc.age.go <- c(hg24.vacc.age.go.list, 
+                     hg48.vacc.age.go.list, tc24.vacc.age.go.list, 
+                     tc48.vacc.age.go.list)
+
+unique.go_vaccage <- length(unique(all.vacc.age.go))
+
+
+hg24.vacc.type.go.list <- as.list(sig.path.hg24.vacc.type$goid)
+hg48.vacc.type.go.list <- as.list(sig.path.hg48.vacc.type$goid)
+tc24.vacc.type.go.list <- as.list(sig.path.tc24.vacc.type$goid)
+tc48.vacc.type.go.list <- as.list(sig.path.tc48.vacc.type$goid)
+
+all.vacc.type.go <- c(hg24.vacc.type.go.list, 
+                      hg48.vacc.type.go.list, 
+                      tc24.vacc.type.go.list, 
+                      tc48.vacc.type.go.list)
+
+unique.go_vacctype <- length(unique(all.vacc.type.go))
+
+
+hg24.vacc.age.type.go.list <- as.list(sig.path.hg24.vacc.age.type$goid)
+hg48.vacc.age.type.go.list <- as.list(sig.path.hg48.vacc.age.type$goid)
+tc24.vacc.age.type.go.list <- as.list(sig.path.tc24.vacc.age.type$goid)
+tc48.vacc.age.type.go.list <- as.list(sig.path.tc48.vacc.age.type$goid)
+
+all.vacc.age.type.go <- c(hg24.vacc.age.type.go.list, 
+                          hg48.vacc.age.type.go.list, 
+                          tc24.vacc.age.type.go.list, 
+                          tc48.vacc.age.type.go.list)
+
+unique.go_vaccagetype <- length(unique(all.vacc.age.go))
+
